@@ -8,8 +8,8 @@
 
 // Normally distributed random numbers with standard deviation of 2.5,
 // quantized to integer values and saturated to the range -7.0 to +7.0.  For
-// the fixed point case, the values are then converted to ints, scaled by 16
-// (i.e. -112 to +112), and finally stored as signed chars.
+// the fixed point case, the values are then converted to ints
+// and finally stored as signed chars.
 void xgpuRandomComplex(ComplexInput* random_num, long long unsigned int length) {
   int i;
   double u1,u2,r,theta,a,b;
@@ -39,13 +39,8 @@ void xgpuRandomComplex(ComplexInput* random_num, long long unsigned int length) 
     random_num[i].real = a;
     random_num[i].imag = b;
 #else
-    // Simulate 4 bit data that has been multipled by 16 (via left shift by 4;
-    // could multiply by 18 to maximize range, but that might be more expensive
-    // than left shift by 4).
-    // (i.e. {-112, -96, -80, ..., +80, +96, +112})
-    //random_num[i] = ComplexInput( ((int)a) << 4, ((int)b) << 4 );
-    random_num[i].real = ((int)a) << 4;
-    random_num[i].imag = ((int)b) << 4;
+    random_num[i].real = ((int)a);
+    random_num[i].imag = ((int)b);
 
     // Uncomment next line to simulate all zeros for every input.
     // Interestingly, it does not give exactly zeros on the output.
@@ -247,6 +242,31 @@ void xgpuSwizzleInput(ComplexInput *out, const ComplexInput *in) {
 	    o[((((t/4*NFREQUENCY+f)*NSTATION+s)*NPOL+p)*2+c)*4+t%4] =
 	      i[( ( (t*NFREQUENCY+f)*NSTATION+s )*NPOL+p )*2 + c];
 	  }
+	}
+      }
+    }
+  }
+
+}
+
+// Compress 8+8 bit real/imag into 4+4-bit
+void xgpuDeFluffInput(SwizzleInput *out, const ComplexInput *in) {
+  printf("Compressing input to 4+4 bits\n");
+
+  unsigned char *o = (unsigned char*)out;
+  const signed char *i = (signed char*)in;
+  int t, f, s, p;
+  signed char re, im;
+  unsigned char c;
+
+  for (t=0; t<NTIME; t++) {
+    for (f=0; f<NFREQUENCY; f++) {
+      for(s=0; s<NSTATION; s++) {
+	for (p=0; p<NPOL; p++) {
+	  re = i[(((t*NFREQUENCY+f)*NSTATION+s)*NPOL+p)*2];
+	  im = i[(((t*NFREQUENCY+f)*NSTATION+s)*NPOL+p)*2 + 1];
+          c = ((re & 0x0f) << 4) + (im & 0x0f);
+	  o[(((t*NFREQUENCY+f)*NSTATION+s)*NPOL+p)] = c;
 	}
       }
     }

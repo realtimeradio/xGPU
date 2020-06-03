@@ -144,6 +144,12 @@ ifeq ($(strip $(DP4A)), yes)
 NVCCFLAGS += -DDP4A
 endif
 
+# If DEVSWIZZLE is defined, the library does a 4-bit -> 8-bit fluff+transpose
+# on the device prior to calling the xcorr kernel
+ifeq ($(strip $(DEVSWIZZLE)), yes)
+NVCCFLAGS += -DDEVSWIZZLE
+endif
+
 ifdef RUNTIME_STATS
 NVCCFLAGS += -DRUNTIME_STATS
 endif

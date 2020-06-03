@@ -24,6 +24,12 @@ typedef struct ComplexInputStruct {
   ReImInput imag;
 } ComplexInput;
 
+#ifdef DEVSWIZZLE
+typedef signed char SwizzleInput;
+#else
+typedef ComplexInput SwizzleInput;
+#endif
+
 #ifndef DP4A
 typedef struct ComplexStruct {
   float real;
@@ -93,7 +99,7 @@ typedef struct XGPUInfoStruct {
 
 typedef struct XGPUContextStruct {
   // memory pointers on host
-  ComplexInput *array_h;
+  SwizzleInput *array_h;
   Complex *matrix_h;
 
   // Size of memory buffers on host
@@ -218,6 +224,25 @@ void xgpuFree(XGPUContext *context);
 //                        complete, but does not dump.
 int xgpuCudaXengine(XGPUContext *context, int syncOp);
 
+// Perform correlation.  Correlates the input data at (context->array_h +
+// context->input_offset).  The syncOp parameter specifies what will be done
+// after sending all the asynchronous tasks to CUDA.  The possible values and
+// their meanings are:
+//
+// SYNCOP_NONE - No further action is taken.
+// SYNCOP_DUMP - Waits for all transfers and computations to
+//               complete, then dumps to output buffer at
+//               "context->matrix_h + context->output_offset".
+// SYNCOP_SYNC_TRANSFER - Waits for all transfers to complete,
+//                        but not necessrily all computations.
+// SYNCOP_SYNC_COMPUTE  - Waits for all computations (and transfers) to
+//                        complete, but does not dump.
+//
+// Unlike xgpuCudaXengine, prior to correlating, perform a GPU-side
+// swizzle to get 4-bit data into an 8-bit buffer of the shape
+// appropriate for DP4A correlation
+int xgpuCudaXengineSwizzle(XGPUContext *context, int syncOp);
+
 // Functions in cpu_util.cc
 
 void xgpuRandomComplex(ComplexInput* random_num, long long unsigned int length);
@@ -227,6 +252,8 @@ void xgpuReorderMatrix(Complex *matrix);
 void xgpuCheckResult(Complex *gpu, Complex *cpu, int verbose, ComplexInput *array_h);
 
 void xgpuSwizzleInput(ComplexInput *out, const ComplexInput *in);
+
+void xgpuDeFluffInput(SwizzleInput *out, const ComplexInput *in);
 
 void xgpuExtractMatrix(Complex *matrix, Complex *packed);
 

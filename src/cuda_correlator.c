@@ -139,6 +139,10 @@ int main(int argc, char** argv) {
   printf("Sending fixed point data to GPU.\n");
 #endif
 
+#if DEVSWIZZLE
+  printf("Sending 4-bit data to GPU and swizzling on device.\n");
+#endif
+
   // perform host memory allocation
 
   // allocate the GPU X-engine memory
@@ -170,7 +174,11 @@ int main(int argc, char** argv) {
   xgpuRandomComplex(array_h, xgpu_info.vecLength);
 
 #ifdef DP4A
+#ifndef DEVSWIZZLE
   xgpuSwizzleInput(context.array_h, array_h);
+#else
+  xgpuDeFluffInput(context.array_h, array_h);
+#endif
 #endif
 
   // ompXengine always uses TRIANGULAR_ORDER
@@ -200,7 +208,11 @@ int main(int argc, char** argv) {
 #ifdef RUNTIME_STATS
       clock_gettime(CLOCK_MONOTONIC, &tic);
 #endif
+#ifndef DEVSWIZZLE
       xgpu_error = xgpuCudaXengine(&context, i==count-1 ? finalSyncOp : syncOp);
+#else
+      xgpu_error = xgpuCudaXengineSwizzle(&context, i==count-1 ? finalSyncOp : syncOp);
+#endif
 #ifdef RUNTIME_STATS
       clock_gettime(CLOCK_MONOTONIC, &toc);
 #endif
@@ -222,7 +234,7 @@ int main(int argc, char** argv) {
     //             = per_call / (NTIME * NFREQUENCY)
     // max_bw (kHz)  = 1 / per_channel = (NTIME * NFREQUENCY) / per_call
     max_bw = xgpu_info.ntime*xgpu_info.nfrequency/per_call/1000; // MHz
-    gbps = ((float)(8 * context.array_len * sizeof(ComplexInput) * count)) / total / 1e6; // Gbps
+    gbps = ((float)(8 * context.array_len * sizeof(SwizzleInput) * count)) / total / 1e6; // Gbps
     printf("Elapsed time %.6f ms total, %.6f ms/call average\n",
         total, per_call);
     printf("Theoretical BW_max %.3f MHz, throughput %.3f Gbps\n",
@@ -237,7 +249,7 @@ int main(int argc, char** argv) {
     //             = per_call / (NTIME * NFREQUENCY)
     // max_bw (kHz)  = 1 / per_channel = (NTIME * NFREQUENCY) / per_call
     max_bw = xgpu_info.ntime*xgpu_info.nfrequency/per_call/1000; // MHz
-    gbps = ((float)(8 * context.array_len * sizeof(ComplexInput) * count * outer_count)) / total / 1e6; // Gbps
+    gbps = ((float)(8 * context.array_len * sizeof(SwizzleInput) * count * outer_count)) / total / 1e6; // Gbps
     printf("Elapsed time %.6f ms total, %.6f ms/call average\n",
         total, per_call);
     printf("Theoretical BW_max %.3f MHz, throughput %.3f Gbps\n",

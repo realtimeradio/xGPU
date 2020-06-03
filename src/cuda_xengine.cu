@@ -33,21 +33,31 @@ typedef struct XGPUInternalContextStruct {
 
   //memory pointers on the device
   ComplexInput *array_d[2];
+#ifdef DEVSWIZZLE
+  SwizzleInput *swizz_d[2];
+#endif
   Complex *matrix_d;
 
   // used for overlapping comms and compute
+#ifdef DEVSWIZZLE
+  cudaStream_t streams[3];
+#else
   cudaStream_t streams[2];
+#endif
   cudaEvent_t copyCompletion[2];
   cudaEvent_t kernelCompletion[2];
+#ifdef DEVSWIZZLE
+  cudaEvent_t swizzleCompletion[2];
+#endif
 
   // texture channel descriptor
   cudaChannelFormatDesc channelDesc;
 
   // Host input array that we allocated and should free
-  ComplexInput * free_array_h;
+  SwizzleInput * free_array_h;
 
   // Host input array that we registered and should unregister
-  ComplexInput * unregister_array_h;
+  SwizzleInput * unregister_array_h;
 
   // Whether xgpuSetHostInputBuffer has been called
   bool array_h_set;
@@ -109,6 +119,9 @@ static __device__ __constant__ unsigned char tIndex[PIPE_LENGTH*NFREQUENCY];
 #endif
 
 #include "kernel.cuh"
+#ifdef DEVSWIZZLE
+#include "swizzle.cuh"
+#endif
 
 static XGPUInfo compiletime_info = {
   .npol =        NPOL,
@@ -242,12 +255,20 @@ int xgpuInit(XGPUContext *context, int device_flags)
   }
 
   //allocate memory on device
-  cudaMalloc((void **) &(internal->array_d[0]), vecLengthPipe*sizeof(ComplexInput));
+#ifdef DEVSWIZZLE
+  cudaMalloc((void **) &(internal->swizz_d[0]), vecLengthPipe*sizeof(SwizzleInput)); //DEVSWIZZLE if for real+imag=1Byte words
+  cudaMalloc((void **) &(internal->swizz_d[1]), vecLengthPipe*sizeof(SwizzleInput));
+#endif
+  cudaMalloc((void **) &(internal->array_d[0]), vecLengthPipe*sizeof(ComplexInput)); // Swizzled 8+8 bit data
   cudaMalloc((void **) &(internal->array_d[1]), vecLengthPipe*sizeof(ComplexInput));
   cudaMalloc((void **) &(internal->matrix_d), matLength*sizeof(Complex));
   checkCudaError();
   
   //clear out any previous values
+#ifdef DEVSWIZZLE
+  cudaMemset(internal->swizz_d[0], '\0', vecLengthPipe*sizeof(SwizzleInput));
+  cudaMemset(internal->swizz_d[1], '\0', vecLengthPipe*sizeof(SwizzleInput));
+#endif
   cudaMemset(internal->array_d[0], '\0', vecLengthPipe*sizeof(ComplexInput));
   cudaMemset(internal->array_d[1], '\0', vecLengthPipe*sizeof(ComplexInput));
   checkCudaError();
@@ -259,13 +280,20 @@ int xgpuInit(XGPUContext *context, int device_flags)
   }
 
   // create the streams
+#ifndef DEVSWIZZLE
   for(int i=0; i<2; i++) cudaStreamCreate(&(internal->streams[i]));
+#else
+  for(int i=0; i<3; i++) cudaStreamCreate(&(internal->streams[i]));
+#endif
   checkCudaError();
 
   // create the events
   for (int i=0; i<2; i++) {
     cudaEventCreateWithFlags(&(internal->kernelCompletion[i]), cudaEventDisableTiming);
     cudaEventCreateWithFlags(&(internal->copyCompletion[i]), cudaEventDisableTiming);
+#ifdef DEVSWIZZLE
+    cudaEventCreateWithFlags(&(internal->swizzleCompletion[i]), cudaEventDisableTiming);
+#endif
   }
   checkCudaError();
 
@@ -406,7 +434,7 @@ int xgpuSetHostInputBuffer(XGPUContext *context)
       cudaHostRegister((void *)ptr_aligned, length, 0);
       CLOCK_GETTIME(CLOCK_MONOTONIC, &b);
       PRINT_ELAPASED("cudaHostRegister", ELAPSED_NS(a,b));
-      internal->unregister_array_h = (ComplexInput *)ptr_aligned;
+      internal->unregister_array_h = (SwizzleInput *)ptr_aligned;
       internal->free_array_h = NULL;
       checkCudaError();
     }
@@ -510,6 +538,9 @@ void xgpuFree(XGPUContext *context)
       cudaStreamDestroy(internal->streams[i]);
       cudaEventDestroy(internal->copyCompletion[i]);
       cudaEventDestroy(internal->kernelCompletion[i]);
+#ifdef DEVSWIZZLE
+      cudaEventDestroy(internal->swizzleCompletion[i]);
+#endif
     }
 
     if(internal->free_array_h) {
@@ -531,6 +562,10 @@ void xgpuFree(XGPUContext *context)
 
     cudaFree(internal->array_d[1]);
     cudaFree(internal->array_d[0]);
+#ifdef DEVSWIZZLE
+    cudaFree(internal->swizz_d[1]);
+    cudaFree(internal->swizz_d[0]);
+#endif
     cudaFree(internal->matrix_d);
 
     free(internal);
@@ -582,12 +617,12 @@ int xgpuCudaXengine(XGPUContext *context, int syncOp)
 
   // Need to fill pipeline before loop
   long long unsigned int vecLengthPipe = compiletime_info.vecLengthPipe;
-  ComplexInput *array_hp = context->array_h + context->input_offset;
+  SwizzleInput *array_hp = context->array_h + context->input_offset;
   // Only start the transfer once the kernel has completed processing input
   // buffer 0.  This is a no-op unless previous call to xgpuCudaXengine() had
   // SYNCOP_NONE or SYNCOP_SYNC_TRANSFER.
   cudaStreamWaitEvent(streams[0], kernelCompletion[0], 0);
-  CUBE_ASYNC_COPY_CALL(array_d[0], array_hp, vecLengthPipe*sizeof(ComplexInput), cudaMemcpyHostToDevice, streams[0]);
+  CUBE_ASYNC_COPY_CALL(array_d[0], array_hp, vecLengthPipe*sizeof(SwizzleInput), cudaMemcpyHostToDevice, streams[0]);
   cudaEventRecord(copyCompletion[0], streams[0]); // record the completion of the h2d transfer
   checkCudaError();
 
@@ -675,3 +710,165 @@ int xgpuCudaXengine(XGPUContext *context, int syncOp)
 
   return XGPU_OK;
 }
+
+#ifdef DEVSWIZZLE
+int xgpuCudaXengineSwizzle(XGPUContext *context, int syncOp)
+{
+  XGPUInternalContext *internal = (XGPUInternalContext *)context->internal;
+  if(!internal) {
+    return XGPU_NOT_INITIALIZED;
+  }
+
+  // xgpuSetHostInputBuffer and xgpuSetHostOutputBuffer must have been called
+  if( !internal->array_h_set || !internal->matrix_h_set ) {
+    return XGPU_HOST_BUFFER_NOT_SET;
+  }
+
+  //assign the device
+  cudaSetDevice(internal->device);
+
+  ComplexInput **array_d = internal->array_d;
+  SwizzleInput **swizz_d = internal->swizz_d;
+  cudaStream_t *streams = internal->streams;
+  cudaEvent_t *copyCompletion = internal->copyCompletion;
+  cudaEvent_t *kernelCompletion = internal->kernelCompletion;
+  cudaEvent_t *swizzleCompletion = internal->swizzleCompletion;
+  cudaChannelFormatDesc channelDesc = internal->channelDesc;
+
+  // set pointers to the real and imaginary components of the device matrix
+#ifndef DP4A
+  float4 *matrix_real_d = (float4 *)(internal->matrix_d);
+  float4 *matrix_imag_d = (float4 *)(internal->matrix_d + compiletime_info.matLength/2);
+#else
+  int4 *matrix_real_d = (int4 *)(internal->matrix_d);
+  int4 *matrix_imag_d = (int4 *)(internal->matrix_d + compiletime_info.matLength/2);
+#endif
+
+  int Nblock = compiletime_info.nstation/min(TILE_HEIGHT,TILE_WIDTH);
+  SwizzleInput *array_load;
+  SwizzleInput *array_swizz;
+  ComplexInput *array_compute; 
+
+  dim3 dimBlock(TILE_WIDTH,TILE_HEIGHT,1);
+  //allocated exactly as many thread blocks as are needed
+  dim3 dimGrid(((Nblock/2+1)*(Nblock/2))/2, compiletime_info.nfrequency);
+
+  // Swizzle threads
+  dim3 dimGridSwizz(compiletime_info.nfrequency, compiletime_info.ntimepipe/4, 1);
+  dim3 dimBlockSwizz((compiletime_info.npol * compiletime_info.nstation) / 4, 1, 1);
+
+  CUBE_ASYNC_START(ENTIRE_PIPELINE);
+
+  // Need to fill pipeline before loop
+  long long unsigned int vecLengthPipe = compiletime_info.vecLengthPipe;
+  SwizzleInput *array_hp = context->array_h + context->input_offset;
+  // Only start the transfer once the kernel has completed processing input
+  // buffer 0.  This is a no-op unless previous call to xgpuCudaXengine() had
+  // SYNCOP_NONE or SYNCOP_SYNC_TRANSFER.
+  cudaStreamWaitEvent(streams[0], kernelCompletion[0], 0);
+
+  // Copy 4-bit words (half the size of ComplexInput)
+  CUBE_ASYNC_COPY_CALL(swizz_d[0], array_hp, vecLengthPipe*sizeof(SwizzleInput), cudaMemcpyHostToDevice, streams[0]);
+  cudaEventRecord(copyCompletion[0], streams[0]); // record the completion of the h2d transfer
+  checkCudaError();
+
+  CUBE_ASYNC_START(PIPELINE_LOOP);
+
+#ifdef POWER_LOOP
+  for (int q=0; ; q++)
+#endif
+  for (int p=1; p<PIPE_LENGTH; p++) {
+    array_compute = array_d[(p+1)%2];
+    array_swizz = swizz_d[(p+1)%2];
+    array_load = swizz_d[p%2];
+
+    // Kernel Calculation
+#if TEXTURE_DIM == 2
+#ifndef DP4A
+    cudaBindTexture2D(0, tex2dfloat2, array_compute, channelDesc, NFREQUENCY*NSTATION*NPOL, NTIME_PIPE,
+		      NFREQUENCY*NSTATION*NPOL*sizeof(ComplexInput));
+#else
+    cudaBindTexture2D(0, tex2dchar4, array_compute, channelDesc, NFREQUENCY*NSTATION*NPOL, NTIME_PIPE/4,
+		      NFREQUENCY*NSTATION*NPOL*2*sizeof(char4));
+#endif
+#else
+#ifndef DP4A
+    cudaBindTexture(0, tex1dfloat2, array_compute, channelDesc, NFREQUENCY*NSTATION*NPOL*NTIME_PIPE*sizeof(ComplexInput));
+#else
+    cudaBindTexture(0, tex1dchar4, array_compute, channelDesc, NFREQUENCY*NSTATION*NPOL*(NTIME_PIPE/4)*sizeof(int2));
+#endif
+#endif
+    cudaStreamWaitEvent(streams[2], copyCompletion[(p+1)%2], 0); // only start the kernel once the h2d transfer is complete
+
+    CUBE_ASYNC_KERNEL_CALL(swizzleKernel, dimGridSwizz, dimBlockSwizz, 0, streams[2],
+                           (unsigned int *)array_swizz, (unsigned int *)array_compute, NFREQUENCY, NSTATION*NPOL);
+    cudaEventRecord(swizzleCompletion[(p+1)%2], streams[2]); // record the completion of the swizzle
+    checkCudaError();
+
+    cudaStreamWaitEvent(streams[1], swizzleCompletion[(p+1)%2], 0); // only start the kernel once the h2d transfer is complete
+
+    CUBE_ASYNC_KERNEL_CALL(shared2x2, dimGrid, dimBlock, 0, streams[1], 
+			   matrix_real_d, matrix_imag_d, NSTATION, writeMatrix);
+    cudaEventRecord(kernelCompletion[(p+1)%2], streams[1]); // record the completion of the kernel
+    checkCudaError();
+
+    // Download next chunk of input data
+    cudaStreamWaitEvent(streams[0], kernelCompletion[p%2], 0); // only start the transfer once the kernel has completed
+    CUBE_ASYNC_COPY_CALL(array_load, array_hp+p*vecLengthPipe, vecLengthPipe*sizeof(SwizzleInput), cudaMemcpyHostToDevice, streams[0]);
+    cudaEventRecord(copyCompletion[p%2], streams[0]); // record the completion of the h2d transfer
+    checkCudaError();
+  }
+
+  CUBE_ASYNC_END(PIPELINE_LOOP);
+
+  array_swizz   = swizz_d[(PIPE_LENGTH+1)%2];
+  array_compute = array_d[(PIPE_LENGTH+1)%2];
+  // Final kernel calculation
+#if TEXTURE_DIM == 2
+#ifndef DP4A
+    cudaBindTexture2D(0, tex2dfloat2, array_compute, channelDesc, NFREQUENCY*NSTATION*NPOL, NTIME_PIPE,
+		      NFREQUENCY*NSTATION*NPOL*sizeof(ComplexInput));
+#else
+    cudaBindTexture2D(0, tex2dchar4, array_compute, channelDesc, NFREQUENCY*NSTATION*NPOL, NTIME_PIPE/4,
+		      NFREQUENCY*NSTATION*NPOL*2*sizeof(char4));
+#endif
+#else
+#ifndef DP4A
+    cudaBindTexture(0, tex1dfloat2, array_compute, channelDesc, NFREQUENCY*NSTATION*NPOL*NTIME_PIPE*sizeof(ComplexInput));
+#else
+    cudaBindTexture(0, tex1dchar4, array_compute, channelDesc, NFREQUENCY*NSTATION*NPOL*(NTIME_PIPE/4)*sizeof(int2));
+#endif
+#endif
+  cudaStreamWaitEvent(streams[2], copyCompletion[(PIPE_LENGTH+1)%2], 0);
+  CUBE_ASYNC_KERNEL_CALL(swizzleKernel, dimGridSwizz, dimBlockSwizz, 0, streams[2],
+                         (unsigned int*)array_swizz, (unsigned int *)array_compute, NFREQUENCY, NSTATION*NPOL);
+  cudaEventRecord(swizzleCompletion[(PIPE_LENGTH+1)%2], streams[2]); // record the completion of the swizzle
+  checkCudaError();
+  cudaStreamWaitEvent(streams[1], swizzleCompletion[(PIPE_LENGTH+1)%2], 0);
+  CUBE_ASYNC_KERNEL_CALL(shared2x2, dimGrid, dimBlock, 0, streams[1], matrix_real_d, matrix_imag_d,
+			 NSTATION, writeMatrix);
+
+  if(syncOp == SYNCOP_DUMP) {
+    checkCudaError();
+    //copy the data back, employing a similar strategy as above
+    CUBE_COPY_CALL(context->matrix_h + context->output_offset, internal->matrix_d, compiletime_info.matLength*sizeof(Complex), cudaMemcpyDeviceToHost);
+    checkCudaError();
+  } else if(syncOp == SYNCOP_SYNC_COMPUTE) {
+    // Synchronize on the compute stream (i.e. wait for it to complete)
+    cudaStreamSynchronize(streams[1]);
+  } else {
+      // record the completion of the kernel for next call
+      cudaEventRecord(kernelCompletion[(PIPE_LENGTH+1)%2], streams[1]);
+      checkCudaError();
+
+      if(syncOp == SYNCOP_SYNC_TRANSFER) {
+        // Synchronize on the transfer stream (i.e. wait for it to complete)
+        cudaStreamSynchronize(streams[0]);
+      }
+  }
+
+  CUBE_ASYNC_END(ENTIRE_PIPELINE);
+
+  return XGPU_OK;
+}
+#endif
