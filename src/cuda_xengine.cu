@@ -754,8 +754,10 @@ int xgpuCudaXengineSwizzle(XGPUContext *context, int syncOp)
   dim3 dimGrid(((Nblock/2+1)*(Nblock/2))/2, compiletime_info.nfrequency);
 
   // Swizzle threads
-  dim3 dimGridSwizz(compiletime_info.nfrequency, compiletime_info.ntimepipe/4, 1);
-  dim3 dimBlockSwizz((compiletime_info.npol * compiletime_info.nstation) / 4, 1, 1);
+  //dim3 dimGridSwizz(compiletime_info.nfrequency, compiletime_info.ntimepipe/4, 1);
+  //dim3 dimBlockSwizz((compiletime_info.npol * compiletime_info.nstation) / (4*POLBLOCKSIZE), 1, 1);
+  dim3 dimGridSwizz(compiletime_info.nfrequency/CHANBLOCKSIZE, compiletime_info.ntimepipe/4, 1);
+  dim3 dimBlockSwizz((compiletime_info.npol * compiletime_info.nstation) / (4*POLBLOCKSIZE), CHANBLOCKSIZE, 1);
 
   CUBE_ASYNC_START(ENTIRE_PIPELINE);
 
