@@ -242,6 +242,9 @@ int xgpuCudaXengine(XGPUContext *context, int syncOp);
 // swizzle to get 4-bit data into an 8-bit buffer of the shape
 // appropriate for DP4A correlation
 int xgpuCudaXengineSwizzle(XGPUContext *context, int syncOp);
+int xgpuCudaXengineSwizzleKernel(XGPUContext *context, int syncOp,
+		                 SwizzleInput *array_d,
+				 Complex *matrix_d);
 
 // Functions in cpu_util.cc
 

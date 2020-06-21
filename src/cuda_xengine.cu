@@ -780,9 +780,9 @@ int xgpuCudaXengineSwizzle(XGPUContext *context, int syncOp)
   for (int q=0; ; q++)
 #endif
   for (int p=1; p<PIPE_LENGTH; p++) {
-    array_compute = array_d[(p+1)%2];
-    array_swizz = swizz_d[(p+1)%2];
-    array_load = swizz_d[p%2];
+    array_compute = array_d[(p+1)%2]; // swizzle output to begin correlating
+    array_swizz = swizz_d[(p+1)%2];   // swizzle input to begin processing
+    array_load = swizz_d[p%2];        // swizzle buffer to load data in to
 
     // Kernel Calculation
 #if TEXTURE_DIM == 2
@@ -867,6 +867,104 @@ int xgpuCudaXengineSwizzle(XGPUContext *context, int syncOp)
         // Synchronize on the transfer stream (i.e. wait for it to complete)
         cudaStreamSynchronize(streams[0]);
       }
+  }
+
+  CUBE_ASYNC_END(ENTIRE_PIPELINE);
+
+  return XGPU_OK;
+}
+
+int xgpuCudaXengineSwizzleKernel(XGPUContext *context, int syncOp,
+		SwizzleInput *swizz_d,
+		Complex *matrix_d)
+{
+  XGPUInternalContext *internal = (XGPUInternalContext *)context->internal;
+  if(!internal) {
+    return XGPU_NOT_INITIALIZED;
+  }
+
+  // xgpuSetHostInputBuffer and xgpuSetHostOutputBuffer must have been called
+  if( !internal->array_h_set || !internal->matrix_h_set ) {
+    return XGPU_HOST_BUFFER_NOT_SET;
+  }
+
+  //assign the device
+  cudaSetDevice(internal->device);
+
+  ComplexInput **array_d = internal->array_d;
+  cudaStream_t *streams = internal->streams;
+  cudaEvent_t *copyCompletion = internal->copyCompletion;
+  cudaEvent_t *kernelCompletion = internal->kernelCompletion;
+  cudaEvent_t *swizzleCompletion = internal->swizzleCompletion;
+  cudaChannelFormatDesc channelDesc = internal->channelDesc;
+
+  // set pointers to the real and imaginary components of the device matrix
+#ifndef DP4A
+  float4 *matrix_real_d = (float4 *)(matrix_d);
+  float4 *matrix_imag_d = (float4 *)(matrix_d + compiletime_info.matLength/2);
+#else
+  int4 *matrix_real_d = (int4 *)(matrix_d);
+  int4 *matrix_imag_d = (int4 *)(matrix_d + compiletime_info.matLength/2);
+#endif
+
+  int Nblock = compiletime_info.nstation/min(TILE_HEIGHT,TILE_WIDTH);
+  SwizzleInput *array_swizz;
+  ComplexInput *array_compute; 
+
+  dim3 dimBlock(TILE_WIDTH,TILE_HEIGHT,1);
+  //allocated exactly as many thread blocks as are needed
+  dim3 dimGrid(((Nblock/2+1)*(Nblock/2))/2, compiletime_info.nfrequency);
+
+  // Swizzle threads
+  dim3 dimGridSwizz(compiletime_info.nfrequency/CHANBLOCKSIZE, compiletime_info.ntime/4, 1); // not ntime_pipe, since there is no pipelining here
+  dim3 dimBlockSwizz((compiletime_info.npol * compiletime_info.nstation) / (4*POLBLOCKSIZE), CHANBLOCKSIZE, 1);
+
+  CUBE_ASYNC_START(ENTIRE_PIPELINE);
+
+  // Only start the swizzle once the kernel has completed processing input
+  // buffer 0.  This is a no-op unless previous call to xgpuCudaXengine() had
+  // SYNCOP_NONE or SYNCOP_SYNC_TRANSFER.
+  cudaStreamWaitEvent(streams[0], kernelCompletion[0], 0);
+
+  // Need to fill pipeline before loop
+  long long unsigned int vecLengthPipe = compiletime_info.vecLengthPipe;
+
+  array_swizz   = swizz_d;
+  array_compute = array_d[0];
+  // Final kernel calculation
+#if TEXTURE_DIM == 2
+#ifndef DP4A
+    cudaBindTexture2D(0, tex2dfloat2, array_compute, channelDesc, NFREQUENCY*NSTATION*NPOL, NTIME,
+		      NFREQUENCY*NSTATION*NPOL*sizeof(ComplexInput));
+#else
+    cudaBindTexture2D(0, tex2dchar4, array_compute, channelDesc, NFREQUENCY*NSTATION*NPOL, NTIME/4,
+		      NFREQUENCY*NSTATION*NPOL*2*sizeof(char4));
+#endif
+#else
+#ifndef DP4A
+    cudaBindTexture(0, tex1dfloat2, array_compute, channelDesc, NFREQUENCY*NSTATION*NPOL*NTIME*sizeof(ComplexInput));
+#else
+    cudaBindTexture(0, tex1dchar4, array_compute, channelDesc, NFREQUENCY*NSTATION*NPOL*(NTIME/4)*sizeof(int2));
+#endif
+#endif
+
+  CUBE_ASYNC_KERNEL_CALL(swizzleKernel, dimGridSwizz, dimBlockSwizz, 0, streams[0],
+                         (unsigned int*)array_swizz, (unsigned int *)array_compute, NFREQUENCY, NSTATION*NPOL);
+  cudaEventRecord(swizzleCompletion[0], streams[0]); // record the completion of the swizzle
+  checkCudaError();
+  cudaStreamWaitEvent(streams[1], swizzleCompletion[0], 0);
+  CUBE_ASYNC_KERNEL_CALL(shared2x2, dimGrid, dimBlock, 0, streams[1], matrix_real_d, matrix_imag_d,
+			 NSTATION, writeMatrix);
+
+  if(syncOp == SYNCOP_DUMP) {
+    checkCudaError();
+  } else if(syncOp == SYNCOP_SYNC_COMPUTE) {
+    // Synchronize on the compute stream (i.e. wait for it to complete)
+    cudaStreamSynchronize(streams[1]);
+  } else {
+      // record the completion of the kernel for next call
+      cudaEventRecord(kernelCompletion[0], streams[1]);
+      checkCudaError();
   }
 
   CUBE_ASYNC_END(ENTIRE_PIPELINE);
