@@ -883,11 +883,6 @@ int xgpuCudaXengineSwizzleKernel(XGPUContext *context, int syncOp,
     return XGPU_NOT_INITIALIZED;
   }
 
-  // xgpuSetHostInputBuffer and xgpuSetHostOutputBuffer must have been called
-  if( !internal->array_h_set || !internal->matrix_h_set ) {
-    return XGPU_HOST_BUFFER_NOT_SET;
-  }
-
   //assign the device
   cudaSetDevice(internal->device);
 
