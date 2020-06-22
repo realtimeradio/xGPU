@@ -56,6 +56,7 @@ typedef struct ComplexStruct {
 #define XGPU_DEVICE_MASK          ((1<<16)-1)
 #define XGPU_DONT_REGISTER_ARRAY  (1<<16)
 #define XGPU_DONT_REGISTER_MATRIX (1<<17)
+#define XGPU_DONT_MALLOC_GPU      (1<<18)
 #define XGPU_DONT_REGISTER        (XGPU_DONT_REGISTER_ARRAY | \
                                    XGPU_DONT_REGISTER_MATRIX)
 
@@ -164,6 +165,7 @@ void xgpuInfo(XGPUInfo *pcxs);
 //
 // The index of the GPU device should be put into device_flags. In addition,
 // the following optional flags can be or'd into this value:
+//   XGPU_DONT_MALLOC_GPU       Disables malloc'ing of GPU memory. Only useful if you are handling GPU memory externally.
 //   XGPU_DONT_REGISTER_ARRAY   Disables registering (pinning) of host array
 //   XGPU_DONT_REGISTER_MATRIX  Disables registering (pinning) of host matrix
 //   XGPU_DONT_REGISTER         Disables registering (pinning) of all host mem
@@ -242,9 +244,18 @@ int xgpuCudaXengine(XGPUContext *context, int syncOp);
 // swizzle to get 4-bit data into an 8-bit buffer of the shape
 // appropriate for DP4A correlation
 int xgpuCudaXengineSwizzle(XGPUContext *context, int syncOp);
-int xgpuCudaXengineSwizzleKernel(XGPUContext *context, int syncOp,
+int xgpuCudaXengineSwizzleKernel(XGPUContext *context, int syncOp, int newAcc,
 		                 SwizzleInput *array_d,
 				 Complex *matrix_d);
+
+// Reorder default triangular ordered xGPU output into an array of
+// freq x visibility x complexity
+// for visibilities defined in [[polA, polB], [polC, polD], ... ] form.
+// in : The device buffer where xGPU output resides
+// out : The device buffer into which sub-selected visibilities should be written
+// vismap : array of visibilities in [[polA, polB], [polC, polD], ... ] form.
+// nvis : Number of pol-pairs in the vismap array
+int xgpuCudaSubSelect(XGPUContext *context, Complex *in, Complex *out, int *vismap, long long unsigned int nvis);
 
 // Functions in cpu_util.cc
 

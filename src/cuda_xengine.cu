@@ -255,28 +255,37 @@ int xgpuInit(XGPUContext *context, int device_flags)
   }
 
   //allocate memory on device
-#ifdef DEVSWIZZLE
-  cudaMalloc((void **) &(internal->swizz_d[0]), vecLengthPipe*sizeof(SwizzleInput)); //DEVSWIZZLE if for real+imag=1Byte words
-  cudaMalloc((void **) &(internal->swizz_d[1]), vecLengthPipe*sizeof(SwizzleInput));
-#endif
+  // Always need array_d memory which holds post-swizzle data, but user may opt to provide
+  // their own input/output buffers on the device for 4-bit and 32-bit data
   cudaMalloc((void **) &(internal->array_d[0]), vecLengthPipe*sizeof(ComplexInput)); // Swizzled 8+8 bit data
   cudaMalloc((void **) &(internal->array_d[1]), vecLengthPipe*sizeof(ComplexInput));
-  cudaMalloc((void **) &(internal->matrix_d), matLength*sizeof(Complex));
+  if( (device_flags & XGPU_DONT_MALLOC_GPU) == 0 ) {
+      fprintf(stderr, "allocating swizz and matrix memory\n");
+#ifdef DEVSWIZZLE
+      cudaMalloc((void **) &(internal->swizz_d[0]), vecLengthPipe*sizeof(SwizzleInput)); //DEVSWIZZLE if for real+imag=1Byte words
+      cudaMalloc((void **) &(internal->swizz_d[1]), vecLengthPipe*sizeof(SwizzleInput));
+#endif
+      cudaMalloc((void **) &(internal->matrix_d), matLength*sizeof(Complex));
+  }
   checkCudaError();
   
   //clear out any previous values
+  if( (device_flags & XGPU_DONT_MALLOC_GPU) == 0 ) {
 #ifdef DEVSWIZZLE
-  cudaMemset(internal->swizz_d[0], '\0', vecLengthPipe*sizeof(SwizzleInput));
-  cudaMemset(internal->swizz_d[1], '\0', vecLengthPipe*sizeof(SwizzleInput));
+    cudaMemset(internal->swizz_d[0], '\0', vecLengthPipe*sizeof(SwizzleInput));
+    cudaMemset(internal->swizz_d[1], '\0', vecLengthPipe*sizeof(SwizzleInput));
 #endif
+  }
   cudaMemset(internal->array_d[0], '\0', vecLengthPipe*sizeof(ComplexInput));
   cudaMemset(internal->array_d[1], '\0', vecLengthPipe*sizeof(ComplexInput));
   checkCudaError();
 
-  // Clear device integration bufer
-  error = xgpuClearDeviceIntegrationBuffer(context);
-  if(error != XGPU_OK) {
-    return error;
+  // Clear device integration buffer
+  if( (device_flags & XGPU_DONT_MALLOC_GPU) == 0 ) {
+    error = xgpuClearDeviceIntegrationBuffer(context);
+    if(error != XGPU_OK) {
+      return error;
+    }
   }
 
   // create the streams
@@ -874,7 +883,7 @@ int xgpuCudaXengineSwizzle(XGPUContext *context, int syncOp)
   return XGPU_OK;
 }
 
-int xgpuCudaXengineSwizzleKernel(XGPUContext *context, int syncOp,
+int xgpuCudaXengineSwizzleKernel(XGPUContext *context, int syncOp, int newAcc,
 		SwizzleInput *swizz_d,
 		Complex *matrix_d)
 {
@@ -885,6 +894,10 @@ int xgpuCudaXengineSwizzleKernel(XGPUContext *context, int syncOp,
 
   //assign the device
   cudaSetDevice(internal->device);
+  if (newAcc == 1) {
+    cudaMemset(matrix_d, '\0', compiletime_info.matLength*sizeof(Complex));
+    checkCudaError();
+  }
 
   ComplexInput **array_d = internal->array_d;
   cudaStream_t *streams = internal->streams;
@@ -952,6 +965,8 @@ int xgpuCudaXengineSwizzleKernel(XGPUContext *context, int syncOp,
 			 NSTATION, writeMatrix);
 
   if(syncOp == SYNCOP_DUMP) {
+    // Sync on the compute stream, which writes the data to device memory
+    cudaStreamSynchronize(streams[1]);
     checkCudaError();
   } else if(syncOp == SYNCOP_SYNC_COMPUTE) {
     // Synchronize on the compute stream (i.e. wait for it to complete)
@@ -966,4 +981,45 @@ int xgpuCudaXengineSwizzleKernel(XGPUContext *context, int syncOp,
 
   return XGPU_OK;
 }
+
+/* Code for reordering and downselecting xGPU output matrices */
+
+__global__
+void subSel(unsigned int *in, unsigned int *out, int nchans, int *map,
+		long long unsigned int mapLen, long long unsigned int matLen)
+{
+  long long unsigned int index = blockIdx.x*blockDim.x + threadIdx.x;
+  int chan = blockIdx.y;
+  long long unsigned int visPerChan = matLen / nchans;
+  if (index >= mapLen || chan >= nchans) {
+    return;
+  }
+  out[mapLen*chan + 2*index] = in[visPerChan*chan + map[index]]; //real
+  out[mapLen*chan + 2*index + 1] = in[visPerChan*chan + map[index] + matLen]; //imag
+}
+
+int xgpuCudaSubSelect(XGPUContext *context, Complex *in, Complex *out, int *vismap, long long unsigned int nvis) {
+  long long unsigned v;
+  int *bl;
+
+  XGPUInternalContext *internal = (XGPUInternalContext *)context->internal;
+  if(!internal) {
+    return XGPU_NOT_INITIALIZED;
+  }
+  cudaSetDevice(internal->device);
+
+  /* The number of entries we need to grab is the  */
+  long long unsigned int matLength = compiletime_info.matLength;
+  unsigned int nfreq = compiletime_info.nfrequency;
+
+  // allocate threads in blocks of 512, rounding up.
+  // This will break if either nfreq > MAX_THREAD_PER_BLOCK_DIM
+  // of nvis > 512*MAX_THREAD_PER_BLOCK_DIM (~4000 dual-pol antennas)
+  // TODO runtime error checking
+  dim3 dimBlock(512);
+  dim3 dimGrid((nvis+511) / 512, nfreq);
+  subSel<<<dimGrid, dimBlock>>>((unsigned int *)in, (unsigned int *)out, nfreq, vismap, nvis, matLength); 
+
+}
+
 #endif
