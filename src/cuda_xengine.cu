@@ -1019,7 +1019,7 @@ int xgpuCudaSubSelect(XGPUContext *context, Complex *in, Complex *out, int *vism
   dim3 dimBlock(512);
   dim3 dimGrid((nvis+511) / 512, nfreq);
   subSel<<<dimGrid, dimBlock>>>((unsigned int *)in, (unsigned int *)out, nfreq, vismap, nvis, matLength); 
-
+  return XGPU_OK;
 }
 
 #endif
