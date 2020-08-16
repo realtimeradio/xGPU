@@ -982,23 +982,32 @@ int xgpuCudaXengineSwizzleKernel(XGPUContext *context, int syncOp, int newAcc,
   return XGPU_OK;
 }
 
-/* Code for reordering and downselecting xGPU output matrices */
+/* 
+   Code for reordering and downselecting xGPU output matrices, while
+   summing over frequency channels.
+ */
 
 __global__
-void subSel(unsigned int *in, unsigned int *out, int nchans, int *map,
-		long long unsigned int mapLen, long long unsigned int matLen)
+void subSel(int *in, int *out, int nchans, int *map,
+		long long unsigned int mapLen, long long unsigned int matLen, int nchan_sum)
 {
   long long unsigned int index = blockIdx.x*blockDim.x + threadIdx.x;
-  int chan = blockIdx.y;
+  int chan = blockIdx.y*nchan_sum;
   long long unsigned int visPerChan = matLen / nchans;
   if (index >= mapLen || chan >= nchans) {
     return;
   }
-  out[mapLen*chan + 2*index] = in[visPerChan*chan + map[index]]; //real
-  out[mapLen*chan + 2*index + 1] = in[visPerChan*chan + map[index] + matLen]; //imag
+  int real = 0, imag = 0;
+  int c;
+  for(c=0; c<nchan_sum; c++) {
+    real += in[visPerChan*(chan + c) + map[index]];
+    imag += in[visPerChan*(chan + c) + map[index] + matLen];
+  }
+  out[mapLen*chan + 2*index] = real;
+  out[mapLen*chan + 2*index + 1] = imag;
 }
 
-int xgpuCudaSubSelect(XGPUContext *context, Complex *in, Complex *out, int *vismap, long long unsigned int nvis) {
+int xgpuCudaSubSelect(XGPUContext *context, Complex *in, Complex *out, int *vismap, long long unsigned int nvis, int nfreq_sum) {
   long long unsigned v;
   int *bl;
 
@@ -1017,8 +1026,8 @@ int xgpuCudaSubSelect(XGPUContext *context, Complex *in, Complex *out, int *vism
   // of nvis > 512*MAX_THREAD_PER_BLOCK_DIM (~4000 dual-pol antennas)
   // TODO runtime error checking
   dim3 dimBlock(512);
-  dim3 dimGrid((nvis+511) / 512, nfreq);
-  subSel<<<dimGrid, dimBlock>>>((unsigned int *)in, (unsigned int *)out, nfreq, vismap, nvis, matLength); 
+  dim3 dimGrid((nvis+511) / 512, nfreq / nfreq_sum);
+  subSel<<<dimGrid, dimBlock>>>((int *)in, (int *)out, nfreq, vismap, nvis, matLength, nfreq_sum); 
   return XGPU_OK;
 }
 
