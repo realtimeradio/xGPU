@@ -254,8 +254,9 @@ int xgpuCudaXengineSwizzleKernel(XGPUContext *context, int syncOp, int newAcc,
 // in : The device buffer where xGPU output resides
 // out : The device buffer into which sub-selected visibilities should be written
 // vismap : array of visibilities in [[polA, polB], [polC, polD], ... ] form.
+// conj : array of ints in [[polA, polB], [polC, polD], ... ] form. 1 if a given pair should be conjugated. 0 otherwise.
 // nvis : Number of pol-pairs in the vismap array
-int xgpuCudaSubSelect(XGPUContext *context, Complex *in, Complex *out, int *vismap, long long unsigned int nvis, int nfreq_sum);
+int xgpuCudaSubSelect(XGPUContext *context, Complex *in, Complex *out, int *vismap, int *conj, long long unsigned int nvis, int nfreq_sum);
 
 // Functions in cpu_util.cc
 

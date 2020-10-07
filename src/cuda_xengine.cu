@@ -984,11 +984,11 @@ int xgpuCudaXengineSwizzleKernel(XGPUContext *context, int syncOp, int newAcc,
 
 /* 
    Code for reordering and downselecting xGPU output matrices, while
-   summing over frequency channels.
+   summing over frequency channels. Optional conjugation per baseline.
  */
 
 __global__
-void subSel(int *in, int *out, int nchans, int *map,
+void subSel(int *in, int *out, int nchans, int *map, int *conj,
 		long long unsigned int mapLen, long long unsigned int matLen, int nchan_sum)
 {
   long long unsigned int index = blockIdx.x*blockDim.x + threadIdx.x;
@@ -997,17 +997,22 @@ void subSel(int *in, int *out, int nchans, int *map,
   if (index >= mapLen || chan >= nchans) {
     return;
   }
+  int do_conj = conj[index];
   int real = 0, imag = 0;
   int c;
   for(c=0; c<nchan_sum; c++) {
     real += in[visPerChan*(chan + c) + map[index]];
-    imag += in[visPerChan*(chan + c) + map[index] + matLen];
+    if (do_conj) {
+      imag -= in[visPerChan*(chan + c) + map[index] + matLen];
+    } else {
+      imag += in[visPerChan*(chan + c) + map[index] + matLen];
+    }
   }
   out[mapLen*chan + 2*index] = real;
   out[mapLen*chan + 2*index + 1] = imag;
 }
 
-int xgpuCudaSubSelect(XGPUContext *context, Complex *in, Complex *out, int *vismap, long long unsigned int nvis, int nfreq_sum) {
+int xgpuCudaSubSelect(XGPUContext *context, Complex *in, Complex *out, int *vismap, int *conj, long long unsigned int nvis, int nfreq_sum) {
   long long unsigned v;
   int *bl;
 
@@ -1027,7 +1032,7 @@ int xgpuCudaSubSelect(XGPUContext *context, Complex *in, Complex *out, int *vism
   // TODO runtime error checking
   dim3 dimBlock(512);
   dim3 dimGrid((nvis+511) / 512, nfreq / nfreq_sum);
-  subSel<<<dimGrid, dimBlock>>>((int *)in, (int *)out, nfreq, vismap, nvis, matLength, nfreq_sum); 
+  subSel<<<dimGrid, dimBlock>>>((int *)in, (int *)out, nfreq, vismap, conj, nvis, matLength, nfreq_sum); 
   return XGPU_OK;
 }
 
