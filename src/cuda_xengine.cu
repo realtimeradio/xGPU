@@ -901,7 +901,6 @@ int xgpuCudaXengineSwizzleKernel(XGPUContext *context, int syncOp, int newAcc,
 
   ComplexInput **array_d = internal->array_d;
   cudaStream_t *streams = internal->streams;
-  cudaEvent_t *copyCompletion = internal->copyCompletion;
   cudaEvent_t *kernelCompletion = internal->kernelCompletion;
   cudaEvent_t *swizzleCompletion = internal->swizzleCompletion;
   cudaChannelFormatDesc channelDesc = internal->channelDesc;
@@ -933,9 +932,6 @@ int xgpuCudaXengineSwizzleKernel(XGPUContext *context, int syncOp, int newAcc,
   // buffer 0.  This is a no-op unless previous call to xgpuCudaXengine() had
   // SYNCOP_NONE or SYNCOP_SYNC_TRANSFER.
   cudaStreamWaitEvent(streams[0], kernelCompletion[0], 0);
-
-  // Need to fill pipeline before loop
-  long long unsigned int vecLengthPipe = compiletime_info.vecLengthPipe;
 
   array_swizz   = swizz_d;
   array_compute = array_d[0];
@@ -991,31 +987,29 @@ __global__
 void subSel(int *in, int *out, int nchans, int *map, int *conj,
 		long long unsigned int mapLen, long long unsigned int matLen, int nchan_sum)
 {
-  long long unsigned int index = blockIdx.x*blockDim.x + threadIdx.x;
-  int chan = blockIdx.y*nchan_sum;
+  long long unsigned int bl_index = blockIdx.x*blockDim.x + threadIdx.x;
+  int chan_out = blockIdx.y;
+  int chan_in  = chan_out*nchan_sum;
   long long unsigned int visPerChan = matLen / nchans;
-  if (index >= mapLen || chan >= nchans) {
+  if (bl_index >= mapLen || chan_in >= nchans) {
     return;
   }
-  int do_conj = conj[index];
+  int do_conj = conj[bl_index];
   int real = 0, imag = 0;
   int c;
   for(c=0; c<nchan_sum; c++) {
-    real += in[visPerChan*(chan + c) + map[index]];
+    real += in[visPerChan*(chan_in + c) + map[bl_index]];
     if (do_conj) {
-      imag -= in[visPerChan*(chan + c) + map[index] + matLen];
+      imag -= in[visPerChan*(chan_in + c) + map[bl_index] + matLen];
     } else {
-      imag += in[visPerChan*(chan + c) + map[index] + matLen];
+      imag += in[visPerChan*(chan_in + c) + map[bl_index] + matLen];
     }
   }
-  out[mapLen*chan + 2*index] = real;
-  out[mapLen*chan + 2*index + 1] = imag;
+  out[2*(mapLen*chan_out + bl_index)] = real;
+  out[2*(mapLen*chan_out + bl_index) + 1] = imag;
 }
 
 int xgpuCudaSubSelect(XGPUContext *context, Complex *in, Complex *out, int *vismap, int *conj, long long unsigned int nvis, int nfreq_sum) {
-  long long unsigned v;
-  int *bl;
-
   XGPUInternalContext *internal = (XGPUInternalContext *)context->internal;
   if(!internal) {
     return XGPU_NOT_INITIALIZED;
