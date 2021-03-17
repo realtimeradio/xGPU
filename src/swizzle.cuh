@@ -4,7 +4,7 @@
 #include <stdint.h>
 
 #define NTIME_GATHER 4
-#define POLBLOCKSIZE 4
+#define POLBLOCKSIZE 32
 #define CHANBLOCKSIZE 8
 
 __constant__ unsigned int lut[16] = {0, 1, 2, 3, 4, 5, 6, 7, 248, 249, 250, 251, 252, 253, 254, 255};
